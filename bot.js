@@ -1,3 +1,13 @@
+import { createServer } from 'http';
+
+// Tiny HTTP server so Render detects an open port (required by web services)
+const server = createServer((req, res) => {
+  res.writeHead(200);
+  res.end('ok');
+});
+const port = process.env.PORT || 3000;
+server.listen(port, () => console.log(`Health server on port ${port}`));
+
 import {
   Client,
   GatewayIntentBits,
