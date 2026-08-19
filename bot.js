@@ -21,6 +21,8 @@ import {
   createAudioResource,
   AudioPlayerStatus,
   getVoiceConnection,
+  VoiceConnectionStatus,
+  entersState,
   StreamType,
 } from '@discordjs/voice';
 import { spawn } from 'child_process';
@@ -106,12 +108,16 @@ async function playStream(connection, streamUrl, track) {
 
   console.log(`[play] Stream fetched (${response.headers.get('content-type')}), starting ffmpeg...`);
 
+  // Output OGG/Opus — @discordjs/voice can demux this directly without
+  // needing the native @discordjs/opus encoder
   const ffmpeg = spawn(ffmpegPath, [
     '-analyzeduration', '0',
     '-i', 'pipe:0',
-    '-f', 's16le',
+    '-c:a', 'libopus',
+    '-f', 'ogg',
     '-ar', '48000',
     '-ac', '2',
+    '-b:a', '128k',
     'pipe:1',
   ]);
 
@@ -130,8 +136,10 @@ async function playStream(connection, streamUrl, track) {
     console.error(`[ffmpeg] Spawn error: ${err.message}`);
   });
 
+  // StreamType.OggOpus tells @discordjs/voice the input is already Opus
+  // in an OGG container — it just demuxes and passes packets to Discord
   const resource = createAudioResource(ffmpeg.stdout, {
-    inputType: StreamType.Raw,
+    inputType: StreamType.OggOpus,
   });
   player.play(resource);
   connection.subscribe(player);
@@ -222,14 +230,32 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    let connection = getVoiceConnection(interaction.guild.id);
-    if (!connection) {
-      connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: interaction.guild.id,
-        adapterCreator: interaction.guild.voiceAdapterCreator,
-        selfDeaf: false,
-      });
+    // Destroy any stale/dead connection before creating a new one
+    const oldConnection = getVoiceConnection(interaction.guild.id);
+    if (oldConnection) {
+      console.log('[voice] Destroying old connection');
+      oldConnection.destroy();
+    }
+
+    // Create fresh connection
+    const connection = joinVoiceChannel({
+      channelId: voiceChannel.id,
+      guildId: interaction.guild.id,
+      adapterCreator: interaction.guild.voiceAdapterCreator,
+      selfDeaf: false,
+      selfMute: false,
+    });
+
+    // Wait for the connection to be Ready before playing
+    try {
+      console.log('[voice] Waiting for connection to be ready...');
+      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+      console.log('[voice] Connection is ready!');
+    } catch (err) {
+      console.error('[voice] Failed to connect:', err.message);
+      connection.destroy();
+      await interaction.editReply('Failed to join the voice channel. Try again.');
+      return;
     }
 
     const guildId = interaction.guild.id;
