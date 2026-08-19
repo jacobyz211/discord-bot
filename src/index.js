@@ -4,7 +4,7 @@ import nacl from 'tweetnacl';
 import { handlePlay, handleSearch, handleStream, handleHealth } from './lib/handlers.js';
 import { ResponseType } from './lib/interactions.js';
 import { ALL_COMMANDS } from './lib/commands.js';
-import { searchAddon, fetchManifest, resolveStream } from './lib/eclipse-client.js';
+import { searchAll, resolveStream, fetchManifest } from './lib/eclipse-client.js';
 
 export default {
   async fetch(request, env) {
@@ -18,12 +18,10 @@ export default {
       return handleInteraction(request, env);
     }
 
-    // Register slash commands — visit this URL in a browser
     if (url.pathname === '/register') {
       return handleRegister(env);
     }
 
-    // Debug route — visit /debug?q=travis+scott in browser to see raw addon responses
     if (url.pathname === '/debug') {
       return handleDebug(request, env);
     }
@@ -102,33 +100,40 @@ async function handleInteraction(request, env) {
   return new Response('Unknown interaction type', { status: 400 });
 }
 
-/**
- * Debug route — visit /debug?q=travis+scott in your phone browser.
- * Shows the raw response from each addon so you can see exactly what's coming back.
- */
 async function handleDebug(request, env) {
   const url = new URL(request.url);
   const query = url.searchParams.get('q') || 'travis scott';
 
-  // Fetch manifests + search from both addons in parallel
-  const [monoManifest, qtManifest, monoSearch, qtSearch] = await Promise.all([
-    fetchManifest(env.MONOCHROME_URL),
-    fetchManifest(env.QOBUZ_TIDAL_URL),
-    fetchAddonRaw(env.MONOCHROME_URL, query),
-    fetchAddonRaw(env.QOBUZ_TIDAL_URL, query),
+  const results = await Promise.all([
+    testAddon('monochrome', env.MONOCHROME_URL, query),
+    testAddon('qobuz-tidal', env.QOBUZ_TIDAL_URL, query),
   ]);
 
-  return new Response(debugPage(query, {
-    monochrome: { manifest: monoManifest, search: monoSearch },
-    qobuzTidal: { manifest: qtManifest, search: qtSearch },
-  }), {
+  return new Response(debugPage(query, results), {
     headers: { 'Content-Type': 'text/html' },
   });
 }
 
-/** Fetch raw search response from an addon — returns {status, body, error} */
-async function fetchAddonRaw(baseUrl, query) {
-  const url = `${baseUrl.replace(/\/$/, '')}/search?q=${encodeURIComponent(query)}`;
+async function testAddon(name, manifestUrl, query) {
+  const base = manifestUrl.replace(/\/manifest\.json?$/, '').replace(/\/$/, '');
+  const result = { name, manifestUrl, baseUrl: base, tests: {} };
+
+  result.tests.manifest = await fetchRaw(manifestUrl);
+  result.tests.search = await fetchRaw(`${base}/search?q=${encodeURIComponent(query)}`);
+
+  if (result.tests.search.parsed?.tracks?.[0]) {
+    const firstTrack = result.tests.search.parsed.tracks[0];
+    const trackId = firstTrack.id || firstTrack.trackId || firstTrack.track_id;
+    if (trackId) {
+      result.tests.stream = await fetchRaw(`${base}/stream/${encodeURIComponent(trackId)}`);
+      result.firstTrackId = trackId;
+    }
+  }
+
+  return result;
+}
+
+async function fetchRaw(url) {
   try {
     const res = await fetch(url, {
       headers: { 'Accept': 'application/json' },
@@ -138,28 +143,23 @@ async function fetchAddonRaw(baseUrl, query) {
     let parsed = null;
     try { parsed = JSON.parse(text); } catch {}
     return {
-      url,
       status: res.status,
-      contentType: res.headers.get('content-type'),
-      rawText: text.slice(0, 2000),
+      contentType: res.headers.get('content-type') || '',
+      body: text.slice(0, 1500),
       parsed,
     };
   } catch (err) {
-    return { url, error: err.message };
+    return { error: err.message };
   }
 }
 
-/**
- * Register slash commands by visiting /register in a browser.
- * Automatically retries on rate limit (429).
- */
 async function handleRegister(env) {
   const token = env.DISCORD_BOT_TOKEN;
   const appId = env.DISCORD_APPLICATION_ID;
 
   if (!token || !appId) {
     return new Response(
-      registerPage('error', 'Missing secrets: DISCORD_BOT_TOKEN and/or DISCORD_APPLICATION_ID are not set. Go to Cloudflare dashboard → your Worker → Settings → Variables and Secrets, and add them as Secrets.'),
+      registerPage('error', 'Missing secrets. Set DISCORD_BOT_TOKEN and DISCORD_APPLICATION_ID in Cloudflare dashboard.'),
       { headers: { 'Content-Type': 'text/html' } }
     );
   }
@@ -180,7 +180,7 @@ async function handleRegister(env) {
 
       if (res.ok) {
         const data = await res.json();
-        const cmdList = data.map(c => `✅ /${c.name} — ${c.description}`).join('<br>');
+        const cmdList = data.map(c => `&#x2705; /${c.name} &mdash; ${c.description}`).join('<br>');
         return new Response(
           registerPage('success', cmdList),
           { headers: { 'Content-Type': 'text/html' } }
@@ -195,7 +195,7 @@ async function handleRegister(env) {
           continue;
         } else {
           return new Response(
-            registerPage('error', `Still rate limited after ${maxRetries} attempts. Wait 30 seconds and refresh this page.`),
+            registerPage('error', `Still rate limited after ${maxRetries} attempts. Wait 30 seconds and refresh.`),
             { headers: { 'Content-Type': 'text/html' } }
           );
         }
@@ -203,12 +203,12 @@ async function handleRegister(env) {
 
       const text = await res.text();
       return new Response(
-        registerPage('error', `Discord API returned ${res.status}: ${text}`),
+        registerPage('error', `Discord API returned ${res.status}: ${escapeHtml(text)}`),
         { headers: { 'Content-Type': 'text/html' } }
       );
     } catch (err) {
       return new Response(
-        registerPage('error', `Request failed: ${err.message}`),
+        registerPage('error', `Request failed: ${escapeHtml(err.message)}`),
         { headers: { 'Content-Type': 'text/html' } }
       );
     }
@@ -239,26 +239,20 @@ function landingPage(env) {
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Eclipse Discord Bot</title></head>
 <body style="font-family:system-ui;background:#1a1a1a;color:#e0e0e0;padding:1.5rem;max-width:600px;margin:auto">
-<h1>🎵 Eclipse Discord Bot</h1>
+<h1>&#x1F3B5; Eclipse Discord Bot</h1>
 <p>Routes Discord slash commands to your Eclipse music addon instances.</p>
-<table border="1" cellpadding="8" style="border-collapse:collapse;width:100%">
+<h3>Current Addon URLs</h3>
+<table border="1" cellpadding="8" style="border-collapse:collapse;width:100%;font-size:0.8rem">
 <tr><th>Addon</th><th>URL</th></tr>
-<tr><td>monochrome</td><td style="word-break:break-all">${env.MONOCHROME_URL}</td></tr>
-<tr><td>qobuz-tidal</td><td style="word-break:break-all">${env.QOBUZ_TIDAL_URL}</td></tr>
+<tr><td>monochrome</td><td style="word-break:break-all">${escapeHtml(env.MONOCHROME_URL || '(not set)')}</td></tr>
+<tr><td>qobuz-tidal</td><td style="word-break:break-all">${escapeHtml(env.QOBUZ_TIDAL_URL || '(not set)')}</td></tr>
 </table>
-<h3>Commands</h3>
-<ul>
-  <li><code>/play</code> — search & play top result</li>
-  <li><code>/search</code> — list up to 10 tracks</li>
-  <li><code>/stream</code> — resolve a direct stream URL</li>
-  <li><code>/health</code> — check addon status</li>
-</ul>
 <h3>Setup</h3>
 <ol>
-  <li><a href="/register" style="color:#6cb6ff">Register slash commands →</a></li>
-  <li><a href="/debug?q=travis+scott" style="color:#6cb6ff">Debug: test addon search →</a></li>
-  <li>Set interactions URL in Discord Portal: <code>/interactions</code></li>
-  <li>Invite bot via OAuth2 (bot + applications.commands scopes)</li>
+<li><a href="/register" style="color:#6cb6ff">Register slash commands</a></li>
+<li><a href="/debug?q=travis+scott" style="color:#6cb6ff">Debug: test addon search</a></li>
+<li>Set interactions URL in Discord Portal: <code>/interactions</code></li>
+<li>Invite bot via OAuth2 (bot + applications.commands scopes)</li>
 </ol>
 </body>
 </html>`;
@@ -274,65 +268,55 @@ function registerPage(status, message) {
 <h1>Command Registration</h1>
 <div style="font-size:1.1rem;line-height:1.8">${message}</div>
 <hr style="margin:1.5rem 0;border-color:#444">
-<a href="/" style="color:#6cb6ff">← Back to bot homepage</a>
+<a href="/" style="color:#6cb6ff">&larr; Back to bot homepage</a>
 </body>
 </html>`;
 }
 
-function debugPage(query, data) {
-  const sections = [];
+function debugPage(query, results) {
+  const sections = results.map(r => {
+    let html = '<div style="border:1px solid #444;border-radius:8px;padding:1rem;margin-bottom:1.5rem">';
+    html += '<h2 style="color:#6cb6ff">' + escapeHtml(r.name) + '</h2>';
+    html += '<p><strong>Base URL:</strong> <code style="word-break:break-all;font-size:0.7rem">' + escapeHtml(r.baseUrl) + '</code></p>';
 
-  for (const [name, info] of Object.entries(data)) {
-    const manifestStr = info.manifest
-      ? `<pre style="background:#222;padding:0.75rem;overflow-x:auto;font-size:0.8rem;border-radius:4px">${escapeHtml(JSON.stringify(info.manifest, null, 2))}</pre>`
-      : '<p style="color:#f87171">❌ No manifest returned</p>';
-
-    const search = info.search;
-    let searchStr;
-    if (search.error) {
-      searchStr = `<p style="color:#f87171">❌ Error: ${escapeHtml(search.error)}</p>`;
-    } else {
-      const trackCount = search.parsed?.tracks?.length ?? '— (no tracks array)';
-      searchStr = `
-        <p><strong>URL:</strong> <code style="word-break:break-all">${escapeHtml(search.url)}</code></p>
-        <p><strong>Status:</strong> ${search.status} | <strong>Content-Type:</strong> ${escapeHtml(search.contentType || '—')}</p>
-        <p><strong>Tracks found:</strong> ${trackCount}</p>
-        <details>
-          <summary style="cursor:pointer;color:#6cb6ff">Raw response (first 2000 chars) →</summary>
-          <pre style="background:#222;padding:0.75rem;overflow-x:auto;font-size:0.75rem;border-radius:4px;white-space:pre-wrap;word-break:break-all">${escapeHtml(search.rawText)}</pre>
-        </details>
-        ${search.parsed ? `
-        <details>
-          <summary style="cursor:pointer;color:#6cb6ff">Parsed JSON →</summary>
-          <pre style="background:#222;padding:0.75rem;overflow-x:auto;font-size:0.75rem;border-radius:4px;white-space:pre-wrap;word-break:break-all">${escapeHtml(JSON.stringify(search.parsed, null, 2).slice(0, 3000))}</pre>
-        </details>` : ''}
-      `;
+    if (r.firstTrackId) {
+      html += '<p style="color:#4ade80">First track ID: <code>' + escapeHtml(String(r.firstTrackId)) + '</code></p>';
     }
 
-    sections.push(`
-      <div style="border:1px solid #444;border-radius:8px;padding:1rem;margin-bottom:1.5rem">
-        <h2 style="color:#6cb6ff">${name}</h2>
-        <h3>Manifest</h3>
-        ${manifestStr}
-        <h3>Search: "${escapeHtml(query)}"</h3>
-        ${searchStr}
-      </div>
-    `);
-  }
+    for (const [testName, test] of Object.entries(r.tests)) {
+      html += '<h3 style="color:#fbbf24;margin-top:1rem">' + escapeHtml(testName) + '</h3>';
+      if (test.error) {
+        html += '<p style="color:#f87171">Error: ' + escapeHtml(test.error) + '</p>';
+      } else {
+        html += '<p><strong>Status:</strong> ' + test.status + ' | <strong>Content-Type:</strong> ' + escapeHtml(test.contentType) + '</p>';
+        if (test.parsed !== null) {
+          const trackCount = test.parsed?.tracks?.length ?? test.parsed?.results?.length ?? '—';
+          html += '<p><strong>Tracks found:</strong> ' + trackCount + '</p>';
+          html += '<details><summary style="cursor:pointer;color:#6cb6ff">Parsed JSON (first 2000 chars)</summary>';
+          html += '<pre style="background:#222;padding:0.75rem;overflow-x:auto;font-size:0.7rem;border-radius:4px;white-space:pre-wrap;word-break:break-all">' + escapeHtml(JSON.stringify(test.parsed, null, 2).slice(0, 2000)) + '</pre></details>';
+        } else {
+          html += '<details><summary style="cursor:pointer;color:#6cb6ff">Raw response (first 1500 chars)</summary>';
+          html += '<pre style="background:#222;padding:0.75rem;overflow-x:auto;font-size:0.7rem;border-radius:4px;white-space:pre-wrap;word-break:break-all">' + escapeHtml(test.body) + '</pre></details>';
+        }
+      }
+    }
+    html += '</div>';
+    return html;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Debug</title></head>
 <body style="font-family:system-ui;background:#1a1a1a;color:#e0e0e0;padding:1.5rem;max-width:800px;margin:auto">
-<h1>🔍 Debug: Addon Responses</h1>
+<h1>&#x1F50D; Debug: Addon Responses</h1>
 <p>Query: <strong>"${escapeHtml(query)}"</strong></p>
 <form method="get" action="/debug" style="margin:1rem 0">
-  <input name="q" placeholder="Search query..." value="${escapeHtml(query)}" style="padding:0.5rem;width:60%;background:#333;color:#fff;border:1px solid #555;border-radius:4px">
-  <button type="submit" style="padding:0.5rem 1rem;background:#5865f2;color:#fff;border:none;border-radius:4px">Test</button>
+<input name="q" placeholder="Search query..." value="${escapeHtml(query)}" style="padding:0.5rem;width:60%;background:#333;color:#fff;border:1px solid #555;border-radius:4px">
+<button type="submit" style="padding:0.5rem 1rem;background:#5865f2;color:#fff;border:none;border-radius:4px">Test</button>
 </form>
-${sections.join('')}
+${sections}
 <hr style="border-color:#444">
-<a href="/" style="color:#6cb6ff">← Back to bot homepage</a>
+<a href="/" style="color:#6cb6ff">&larr; Back to bot homepage</a>
 </body>
 </html>`;
 }
