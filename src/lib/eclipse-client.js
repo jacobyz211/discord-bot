@@ -1,20 +1,28 @@
 // src/lib/eclipse-client.js
-// Thin client that hits your deployed Eclipse addon instances (monochrome and
-// qobuz-tidal-eclipse) and returns normalized search + stream results.
-//
-// Both addons follow the Eclipse addon spec (https://eclipsemusic.app/docs):
-//   GET /manifest.json
-//   GET /search?q={query}
-//   GET /stream/{id}
-//   GET /album/{id}
-//   GET /artist/{id}
-//   GET /playlist/{id}
+// Client for Eclipse addon instances.
+// Handles token-based URLs like:
+//   https://addon.example/u/{token}/manifest.json
+// The bot stores the full manifest URL; this module strips /manifest.json
+// to get the base, then appends /search, /stream/{id}, etc.
 
-const TIMEOUT_MS = 5000;
+const TIMEOUT_MS = 8000;
 
 /**
- * Fetch with a hard timeout so one slow addon never stalls the bot.
+ * Extract the base URL (everything before /manifest.json) from a manifest URL.
+ * @param {string} manifestUrl
+ * @returns {string}
  */
+function getBaseUrl(manifestUrl) {
+  const url = manifestUrl.replace(/\/$/, '');
+  if (url.endsWith('/manifest.json')) {
+    return url.slice(0, -'/manifest.json'.length);
+  }
+  if (url.endsWith('/manifest')) {
+    return url.slice(0, -'/manifest'.length);
+  }
+  return url;
+}
+
 async function fetchWithTimeout(url, opts = {}, timeoutMs = TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -27,13 +35,12 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = TIMEOUT_MS) {
 }
 
 /**
- * Fetch the manifest from an addon to confirm it's alive.
- * @param {string} baseUrl  e.g. https://monochrome.rickyaddons.dpdns.org
- * @returns {Promise<object|null>}
+ * Fetch the manifest from an addon.
+ * @param {string} manifestUrl  Full URL ending in /manifest.json
  */
-export async function fetchManifest(baseUrl) {
+export async function fetchManifest(manifestUrl) {
   try {
-    const res = await fetchWithTimeout(`${trimSlash(baseUrl)}/manifest.json`);
+    const res = await fetchWithTimeout(manifestUrl);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -43,32 +50,32 @@ export async function fetchManifest(baseUrl) {
 
 /**
  * Search a single addon.
- * @param {string} baseUrl
+ * @param {string} manifestUrl  Full manifest URL
  * @param {string} query
- * @param {string} sourceName  "monochrome" or "qobuz-tidal" — used to tag results
- * @returns {Promise<{tracks: Array, albums: Array, artists: Array}>}
+ * @param {string} sourceName  "monochrome" or "qobuz-tidal"
  */
-export async function searchAddon(baseUrl, query, sourceName) {
-  const url = `${trimSlash(baseUrl)}/search?q=${encodeURIComponent(query)}`;
+export async function searchAddon(manifestUrl, query, sourceName) {
+  const base = getBaseUrl(manifestUrl);
+  const url = `${base}/search?q=${encodeURIComponent(query)}`;
   try {
     const res = await fetchWithTimeout(url);
     if (!res.ok) return { tracks: [], albums: [], artists: [] };
     const data = await res.json();
     return {
-      tracks: (data.tracks || []).map((t) => ({
+      tracks: (data.tracks || data.results || []).map((t) => ({
         ...t,
         source: sourceName,
-        addonBaseUrl: baseUrl,
+        addonManifestUrl: manifestUrl,
       })),
       albums: (data.albums || []).map((a) => ({
         ...a,
         source: sourceName,
-        addonBaseUrl: baseUrl,
+        addonManifestUrl: manifestUrl,
       })),
       artists: (data.artists || []).map((a) => ({
         ...a,
         source: sourceName,
-        addonBaseUrl: baseUrl,
+        addonManifestUrl: manifestUrl,
       })),
     };
   } catch {
@@ -77,12 +84,8 @@ export async function searchAddon(baseUrl, query, sourceName) {
 }
 
 /**
- * Search both addons in parallel, then merge results.
+ * Search both addons in parallel, merge results.
  * Preferred source's tracks come first.
- *
- * @param {object} env  Worker env (MONOCHROME_URL, QOBUZ_TIDAL_URL, PREFERRED_SOURCE)
- * @param {string} query
- * @returns {Promise<{tracks: Array, albums: Array, artists: Array}>}
  */
 export async function searchAll(env, query) {
   const [mono, qt] = await Promise.all([
@@ -102,11 +105,7 @@ export async function searchAll(env, query) {
 
 /**
  * Resolve a playable stream URL for a track.
- * If the search result already had streamURL, use it directly.
- * Otherwise call the addon's /stream/{id} endpoint.
- *
- * @param {object} track  normalized track object (must include `id`, `addonBaseUrl`)
- * @returns {Promise<{url: string, format?: string, quality?: string}|null>}
+ * Uses the track's addonManifestUrl to build the stream endpoint.
  */
 export async function resolveStream(track) {
   if (track.streamURL) {
@@ -117,7 +116,8 @@ export async function resolveStream(track) {
     };
   }
 
-  const url = `${trimSlash(track.addonBaseUrl)}/stream/${encodeURIComponent(track.id)}`;
+  const base = getBaseUrl(track.addonManifestUrl);
+  const url = `${base}/stream/${encodeURIComponent(track.id)}`;
   try {
     const res = await fetchWithTimeout(url);
     if (!res.ok) return null;
@@ -134,12 +134,11 @@ export async function resolveStream(track) {
 }
 
 /**
- * Fetch album tracks for browsing.
- * @param {string} baseUrl
- * @param {string} albumId
+ * Fetch album details.
  */
-export async function fetchAlbum(baseUrl, albumId) {
-  const url = `${trimSlash(baseUrl)}/album/${encodeURIComponent(albumId)}`;
+export async function fetchAlbum(manifestUrl, albumId) {
+  const base = getBaseUrl(manifestUrl);
+  const url = `${base}/album/${encodeURIComponent(albumId)}`;
   try {
     const res = await fetchWithTimeout(url);
     if (!res.ok) return null;
@@ -151,11 +150,10 @@ export async function fetchAlbum(baseUrl, albumId) {
 
 /**
  * Fetch artist details.
- * @param {string} baseUrl
- * @param {string} artistId
  */
-export async function fetchArtist(baseUrl, artistId) {
-  const url = `${trimSlash(baseUrl)}/artist/${encodeURIComponent(artistId)}`;
+export async function fetchArtist(manifestUrl, artistId) {
+  const base = getBaseUrl(manifestUrl);
+  const url = `${base}/artist/${encodeURIComponent(artistId)}`;
   try {
     const res = await fetchWithTimeout(url);
     if (!res.ok) return null;
@@ -165,7 +163,6 @@ export async function fetchArtist(baseUrl, artistId) {
   }
 }
 
-/** Remove duplicate tracks by (title + artist) — keeps the preferred-source copy. */
 function dedupeTracks(tracks) {
   const seen = new Set();
   const out = [];
@@ -176,9 +173,4 @@ function dedupeTracks(tracks) {
     out.push(t);
   }
   return out;
-}
-
-/** Strip trailing slash from a URL. */
-function trimSlash(url) {
-  return url.endsWith('/') ? url.slice(0, -1) : url;
 }
