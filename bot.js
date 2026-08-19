@@ -21,6 +21,7 @@ import {
   createAudioResource,
   AudioPlayerStatus,
   getVoiceConnection,
+  StreamType,
 } from '@discordjs/voice';
 import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
@@ -95,7 +96,6 @@ async function playStream(connection, streamUrl, track) {
 
   console.log(`[play] Fetching stream: ${streamUrl.slice(0, 80)}...`);
 
-  // Step 1: Fetch the audio with Node.js native fetch (handles HTTPS properly)
   const response = await fetch(streamUrl, {
     headers: { 'User-Agent': 'EclipseDiscordBot/1.0' },
   });
@@ -106,22 +106,18 @@ async function playStream(connection, streamUrl, track) {
 
   console.log(`[play] Stream fetched (${response.headers.get('content-type')}), starting ffmpeg...`);
 
-  // Step 2: Spawn ffmpeg reading from stdin, outputting Opus to stdout
   const ffmpeg = spawn(ffmpegPath, [
     '-analyzeduration', '0',
     '-i', 'pipe:0',
-    '-f', 'opus',
+    '-f', 's16le',
     '-ar', '48000',
     '-ac', '2',
-    '-b:a', '128k',
     'pipe:1',
   ]);
 
-  // Step 3: Pipe the HTTP response body into ffmpeg's stdin
   const nodeStream = Readable.fromWeb(response.body);
   nodeStream.pipe(ffmpeg.stdin);
 
-  // Log ffmpeg output
   ffmpeg.stderr.on('data', (data) => {
     console.log(`[ffmpeg] ${data.toString().trim()}`);
   });
@@ -134,8 +130,9 @@ async function playStream(connection, streamUrl, track) {
     console.error(`[ffmpeg] Spawn error: ${err.message}`);
   });
 
-  // Step 4: Create audio resource from ffmpeg stdout
-  const resource = createAudioResource(ffmpeg.stdout);
+  const resource = createAudioResource(ffmpeg.stdout, {
+    inputType: StreamType.Raw,
+  });
   player.play(resource);
   connection.subscribe(player);
 
