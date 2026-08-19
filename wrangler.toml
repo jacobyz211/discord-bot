@@ -2,20 +2,18 @@ name = "eclipse-discord-bot"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
 
-# Discord application credentials — set these first
-# Get them from https://discord.com/developers/applications -> your app -> General
-#   DISCORD_PUBLIC_KEY  : Public Key (shown on the General tab)
-#   DISCORD_BOT_TOKEN   : Bot token (Bot tab -> Reset Token)
-#   DISCORD_APPLICATION_ID : Application ID (General tab -> App ID)
-#
-# Set via:  wrangler secret put DISCORD_PUBLIC_KEY
-#           wrangler secret put DISCORD_BOT_TOKEN
-#           wrangler secret put DISCORD_APPLICATION_ID
+# Discord application credentials — set these as SECRETS (not vars):
+#   wrangler secret put DISCORD_PUBLIC_KEY
+#   wrangler secret put DISCORD_BOT_TOKEN
+#   wrangler secret put DISCORD_APPLICATION_ID
+# Or via Cloudflare dashboard → Worker → Settings → Variables and Secrets
 
-# Your deployed Eclipse addon instances (used as the music backends)
+# Your Eclipse addon manifest URLs (with token paths).
+# These are the full URLs that end in /manifest.json
+# The bot strips /manifest.json and uses the base for /search, /stream, etc.
 [vars]
-MONOCHROME_URL = "https://monochrome.rickyaddons.dpdns.org"
-QOBUZ_TIDAL_URL = "https://qobuz-tidal-eclipse.cyrusna29.workers.dev"
+MONOCHROME_URL = "https://monochrome.rickyaddons.dpdns.org/u/8fbda2f7515bcd0c88729198695e~~~SElNQVg/manifest.json"
+QOBUZ_TIDAL_URL = "https://qobuz-tidal-eclipse.cyrusna29.workers.dev/u/wh4g2a1rxm2gugcfazlnwagkm57e/manifest.json"
 
-# Which addon to prefer when both have a match (monochrome or qobuz-tidal)
+# Which addon to prefer when both have a match
 PREFERRED_SOURCE = "monochrome"
