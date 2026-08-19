@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: eclipse-voice-bot
+    runtime: docker
+    plan: free
+    region: virginia
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: MONOCHROME_URL
+        value: https://monochrome.rickyaddons.dpdns.org/u/8fbda2f7515bcd0c88729198695e~~~SElNQVg/manifest.json
+      - key: QOBUZ_TIDAL_URL
+        value: https://qobuz-tidal-eclipse.cyrusna29.workers.dev/u/wh4g2a1rxm2gugcfazlnwagkm57e/manifest.json
