@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import { Readable } from 'stream';
 
 const server = createServer((req, res) => {
   res.writeHead(200);
@@ -89,16 +90,26 @@ async function resolveStream(track) {
   }
 }
 
-function playStream(connection, streamUrl, track) {
+async function playStream(connection, streamUrl, track) {
   const player = createAudioPlayer();
 
-  console.log(`[ffmpeg] Starting playback: ${track.title || 'Unknown'}`);
-  console.log(`[ffmpeg] Stream URL: ${streamUrl}`);
+  console.log(`[play] Fetching stream: ${streamUrl.slice(0, 80)}...`);
 
+  // Step 1: Fetch the audio with Node.js native fetch (handles HTTPS properly)
+  const response = await fetch(streamUrl, {
+    headers: { 'User-Agent': 'EclipseDiscordBot/1.0' },
+  });
+  if (!response.ok) {
+    console.error(`[play] Fetch failed: ${response.status} ${response.statusText}`);
+    return;
+  }
+
+  console.log(`[play] Stream fetched (${response.headers.get('content-type')}), starting ffmpeg...`);
+
+  // Step 2: Spawn ffmpeg reading from stdin, outputting Opus to stdout
   const ffmpeg = spawn(ffmpegPath, [
-    '-re',
-    '-i', streamUrl,
     '-analyzeduration', '0',
+    '-i', 'pipe:0',
     '-f', 'opus',
     '-ar', '48000',
     '-ac', '2',
@@ -106,22 +117,31 @@ function playStream(connection, streamUrl, track) {
     'pipe:1',
   ]);
 
-  // Log ffmpeg stderr so we can see errors
+  // Step 3: Pipe the HTTP response body into ffmpeg's stdin
+  const nodeStream = Readable.fromWeb(response.body);
+  nodeStream.pipe(ffmpeg.stdin);
+
+  // Log ffmpeg output
   ffmpeg.stderr.on('data', (data) => {
     console.log(`[ffmpeg] ${data.toString().trim()}`);
   });
 
   ffmpeg.on('close', (code) => {
-    console.log(`[ffmpeg] Process exited with code ${code}`);
+    console.log(`[ffmpeg] Exited with code ${code}`);
   });
 
   ffmpeg.on('error', (err) => {
     console.error(`[ffmpeg] Spawn error: ${err.message}`);
   });
 
+  // Step 4: Create audio resource from ffmpeg stdout
   const resource = createAudioResource(ffmpeg.stdout);
   player.play(resource);
   connection.subscribe(player);
+
+  player.on(AudioPlayerStatus.Playing, () => {
+    console.log('[player] Now playing audio');
+  });
 
   player.on(AudioPlayerStatus.Idle, () => {
     console.log('[player] Idle — checking queue');
@@ -131,10 +151,6 @@ function playStream(connection, streamUrl, track) {
       const next = queue.shift();
       playStream(connection, next.streamUrl, next.track);
     }
-  });
-
-  player.on(AudioPlayerStatus.Playing, () => {
-    console.log('[player] Now playing audio');
   });
 
   player.on('error', (err) => {
@@ -209,8 +225,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    console.log(`[stream] Resolved URL: ${streamUrl}`);
-
     let connection = getVoiceConnection(interaction.guild.id);
     if (!connection) {
       connection = joinVoiceChannel({
@@ -225,7 +239,7 @@ client.on('interactionCreate', async (interaction) => {
     const queue = queues.get(guildId) || [];
     queues.set(guildId, queue);
 
-    playStream(connection, streamUrl, track);
+    await playStream(connection, streamUrl, track);
 
     const fmtStr = track.format ? ` [${track.format.toUpperCase()}]` : '';
     await interaction.editReply(
@@ -242,7 +256,7 @@ client.on('interactionCreate', async (interaction) => {
     const queue = queues.get(interaction.guild.id) || [];
     if (queue.length > 0) {
       const next = queue.shift();
-      playStream(connection, next.streamUrl, next.track);
+      await playStream(connection, next.streamUrl, next.track);
       await interaction.reply(`Skipped! Now playing: **${next.track.title || 'Unknown'}**`);
     } else {
       await interaction.reply('Skipped! Queue is empty.');
