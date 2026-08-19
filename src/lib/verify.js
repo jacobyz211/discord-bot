@@ -1,45 +1,34 @@
 // src/lib/verify.js
-// Discord Ed25519 signature verification — works on Cloudflare Workers WebCrypto API
-// Discord signs every interaction request with Ed25519; the endpoint must verify
-// or Discord will reject the URL.
+// Discord Ed25519 signature verification using tweetnacl (pure JS, no WebCrypto).
+// This is the same approach the official discord-interactions npm package uses.
+// IMPORTANT: the body MUST be the raw request text, NOT parsed JSON —
+// any whitespace change invalidates the signature.
+
+import nacl from 'tweetnacl';
 
 /**
- * Verify Discord interaction signature.
+ * Verify a Discord interaction request signature.
+ *
  * @param {string} publicKey  64-byte hex Ed25519 public key from Discord Developer Portal
- * @param {string} signature  hex signature from x-signature-ed25519 header
- * @param {string} timestamp  from x-signature-timestamp header
- * @param {string} body       raw request body text
- * @returns {Promise<boolean>}
+ * @param {string} signature  hex signature from X-Signature-Ed25519 header
+ * @param {string} timestamp  from X-Signature-Timestamp header
+ * @param {string} body       raw request body (await request.text())
+ * @returns {boolean}
  */
-export async function verifyDiscordRequest(publicKey, signature, timestamp, body) {
+export function verifyDiscordRequest(publicKey, signature, timestamp, body) {
   if (!publicKey || !signature || !timestamp || !body) return false;
 
-  // Discord sends a 64-byte Ed25519 signature.
-  // Cloudflare Workers WebCrypto supports NODE-ED25519 / EdDSA via importKey.
-  const keyData = hexToBytes(publicKey);
-  const sigBytes = hexToBytes(signature);
-
-  const key = await crypto.subtle.importKey(
-    'raw',
-    keyData,
-    { name: 'NODE-ED25519', namedCurve: 'NODE-ED25519' },
-    false,
-    ['verify']
-  );
-
-  const message = new TextEncoder().encode(timestamp + body);
-
-  const valid = await crypto.subtle.verify(
-    { name: 'NODE-ED25519' },
-    key,
-    sigBytes,
-    message
-  );
-
-  return valid;
+  try {
+    const sigBytes = hexToBytes(signature);
+    const keyBytes = hexToBytes(publicKey);
+    const message = new TextEncoder().encode(timestamp + body);
+    return nacl.sign.detached.verify(message, sigBytes, keyBytes);
+  } catch (err) {
+    console.error('Signature verification error:', err);
+    return false;
+  }
 }
 
-/** Convert a hex string to Uint8Array. */
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
