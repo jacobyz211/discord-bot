@@ -1,6 +1,5 @@
 import { createServer } from 'http';
 
-// Tiny HTTP server so Render detects an open port (required by web services)
 const server = createServer((req, res) => {
   res.writeHead(200);
   res.end('ok');
@@ -93,11 +92,13 @@ async function resolveStream(track) {
 function playStream(connection, streamUrl, track) {
   const player = createAudioPlayer();
 
+  console.log(`[ffmpeg] Starting playback: ${track.title || 'Unknown'}`);
+  console.log(`[ffmpeg] Stream URL: ${streamUrl}`);
+
   const ffmpeg = spawn(ffmpegPath, [
     '-re',
     '-i', streamUrl,
     '-analyzeduration', '0',
-    '-loglevel', '0',
     '-f', 'opus',
     '-ar', '48000',
     '-ac', '2',
@@ -105,11 +106,25 @@ function playStream(connection, streamUrl, track) {
     'pipe:1',
   ]);
 
+  // Log ffmpeg stderr so we can see errors
+  ffmpeg.stderr.on('data', (data) => {
+    console.log(`[ffmpeg] ${data.toString().trim()}`);
+  });
+
+  ffmpeg.on('close', (code) => {
+    console.log(`[ffmpeg] Process exited with code ${code}`);
+  });
+
+  ffmpeg.on('error', (err) => {
+    console.error(`[ffmpeg] Spawn error: ${err.message}`);
+  });
+
   const resource = createAudioResource(ffmpeg.stdout);
   player.play(resource);
   connection.subscribe(player);
 
   player.on(AudioPlayerStatus.Idle, () => {
+    console.log('[player] Idle — checking queue');
     const guildId = connection.joinConfig.guildId;
     const queue = queues.get(guildId);
     if (queue && queue.length > 0) {
@@ -118,8 +133,13 @@ function playStream(connection, streamUrl, track) {
     }
   });
 
-  player.on('error', (err) => console.error('Player error:', err.message));
-  ffmpeg.on('error', (err) => console.error('ffmpeg error:', err.message));
+  player.on(AudioPlayerStatus.Playing, () => {
+    console.log('[player] Now playing audio');
+  });
+
+  player.on('error', (err) => {
+    console.error('[player] Error:', err.message);
+  });
 
   return player;
 }
@@ -181,11 +201,15 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const track = tracks[0];
+    console.log(`[search] Top result: ${track.title} by ${track.artist} (ID: ${track.id})`);
+
     const streamUrl = await resolveStream(track);
     if (!streamUrl) {
       await interaction.editReply(`Found **${track.title || 'track'}** but couldn't resolve a stream URL.`);
       return;
     }
+
+    console.log(`[stream] Resolved URL: ${streamUrl}`);
 
     let connection = getVoiceConnection(interaction.guild.id);
     if (!connection) {
@@ -193,15 +217,12 @@ client.on('interactionCreate', async (interaction) => {
         channelId: voiceChannel.id,
         guildId: interaction.guild.id,
         adapterCreator: interaction.guild.voiceAdapterCreator,
+        selfDeaf: false,
       });
     }
 
     const guildId = interaction.guild.id;
     const queue = queues.get(guildId) || [];
-    for (let i = 1; i < Math.min(5, tracks.length); i++) {
-      const s = await resolveStream(tracks[i]);
-      if (s) queue.push({ track: tracks[i], streamUrl: s });
-    }
     queues.set(guildId, queue);
 
     playStream(connection, streamUrl, track);
