@@ -7,7 +7,6 @@ import {
 } from './eclipse-client.js';
 import {
   ResponseType,
-  followUp,
   buildTrackEmbed,
   buildStreamEmbed,
   buildHealthEmbed,
@@ -15,7 +14,6 @@ import {
 
 /**
  * /play — search both addons, return top track + stream URL.
- * Deferred response (type 5) so we can take up to 15 min, then follow up.
  */
 export async function handlePlay(interaction, env) {
   const query = interaction.data.options?.find((o) => o.name === 'query')?.value;
@@ -34,9 +32,14 @@ export async function handlePlay(interaction, env) {
 
   const stream = await resolveStream(topTrack);
   if (!stream) {
+    // Still show the track info even if stream resolution fails
+    const embed = buildTrackEmbed(topTrack);
     return {
       type: ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-      data: { content: `Found **${topTrack.title}** but couldn't resolve a stream URL.` },
+      data: {
+        content: `Found **${topTrack.title}** by ${topTrack.artist || 'Unknown'} but couldn't resolve a stream URL.`,
+        embeds: [embed],
+      },
     };
   }
 
@@ -88,13 +91,13 @@ export async function handleStream(interaction, env) {
     return { type: ResponseType.CHANNEL_MESSAGE_WITH_SOURCE, data: { content: 'Missing id or source.' } };
   }
 
-  const baseUrl = source === 'monochrome' ? env.MONOCHROME_URL : env.QOBUZ_TIDAL_URL;
+  const manifestUrl = source === 'monochrome' ? env.MONOCHROME_URL : env.QOBUZ_TIDAL_URL;
   const track = {
     id,
     title: 'Requested track',
     artist: source,
     source,
-    addonBaseUrl: baseUrl,
+    addonManifestUrl: manifestUrl,
   };
 
   const stream = await resolveStream(track);
