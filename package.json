@@ -1,15 +1,21 @@
 {
   "name": "eclipse-discord-bot",
   "version": "1.0.0",
-  "description": "Discord bot that searches and streams music via Eclipse addons (monochrome + qobuz-tidal-eclipse)",
-  "main": "src/index.js",
+  "description": "Discord bot that plays music from Eclipse addons in voice channels",
+  "main": "bot.js",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "register": "node scripts/register-commands.js"
+    "start": "node bot.js",
+    "dev": "node --watch bot.js",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy"
   },
   "dependencies": {
+    "discord.js": "^14.16.0",
+    "@discordjs/voice": "^0.18.0",
+    "@discordjs/opus": "^0.10.0",
+    "ffmpeg-static": "^5.2.0",
+    "libsodium-wrappers": "^0.7.15",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
