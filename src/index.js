@@ -1,8 +1,6 @@
 // src/index.js
 // Main Cloudflare Worker entry point.
-// Receives Discord HTTP interactions, verifies the Ed25519 signature,
-// and routes to command handlers that hit your deployed Eclipse addon instances.
-import { verifyDiscordRequest } from './lib/verify.js';
+import nacl from 'tweetnacl';
 import { handlePlay, handleSearch, handleStream, handleHealth } from './lib/handlers.js';
 import { ResponseType } from './lib/interactions.js';
 
@@ -10,17 +8,15 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // ── Health probe endpoint (for uptime monitors) ──────────────────
+    // Simple health probe for uptime monitors
     if (url.pathname === '/_health') {
       return new Response('ok', { status: 200 });
     }
 
-    // ── Discord interactions endpoint ─────────────────────────────────
     if (url.pathname === '/interactions') {
       return handleInteraction(request, env);
     }
 
-    // ── Simple landing page at root ──────────────────────────────────
     return new Response(landingPage(env), {
       headers: { 'Content-Type': 'text/html' },
     });
@@ -28,30 +24,41 @@ export default {
 };
 
 async function handleInteraction(request, env) {
-  // Discord sends the signature in headers; body is raw text.
-  const signature = request.headers.get('x-signature-ed25519');
-  const timestamp = request.headers.get('x-signature-timestamp');
+  // Read the RAW body text — must be unparsed for signature verification.
   const body = await request.text();
+  const signature = request.headers.get('X-Signature-Ed25519');
+  const timestamp = request.headers.get('X-Signature-Timestamp');
 
-  // 1. Verify signature — required or Discord disables the endpoint.
-  const isValid = await verifyDiscordRequest(
-    env.DISCORD_PUBLIC_KEY,
-    signature,
-    timestamp,
-    body
-  );
+  // 1. Verify signature — if this fails, Discord rejects the endpoint.
+  if (!signature || !timestamp) {
+    return new Response('Missing signature headers', { status: 401 });
+  }
+
+  let isValid = false;
+  try {
+    const keyBytes = hexToBytes(env.DISCORD_PUBLIC_KEY);
+    const sigBytes = hexToBytes(signature);
+    const message = new TextEncoder().encode(timestamp + body);
+    isValid = nacl.sign.detached.verify(message, sigBytes, keyBytes);
+  } catch (err) {
+    console.error('Verify threw:', err);
+    return new Response('Signature verification failed', { status: 401 });
+  }
+
   if (!isValid) {
     return new Response('Invalid request signature', { status: 401 });
   }
 
+  // 2. Parse the now-verified body.
   const interaction = JSON.parse(body);
 
-  // 2. PING — Discord sends this when verifying the endpoint URL.
+  // 3. PING — Discord sends type 1 when verifying the endpoint URL.
+  //    Must respond with { type: 1 } exactly.
   if (interaction.type === 1) {
-    return json({ type: 1 }); // PONG
+    return json({ type: 1 });
   }
 
-  // 3. Slash command
+  // 4. Slash command (type 2)
   if (interaction.type === 2) {
     const commandName = interaction.data?.name;
     let response;
@@ -80,7 +87,7 @@ async function handleInteraction(request, env) {
       console.error(`Command ${commandName} failed:`, err);
       response = {
         type: ResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: { content: `⚠️ Error running /${commandName}: ${err.message}` },
+        data: { content: `Error running /${commandName}: ${err.message}` },
       };
     }
 
@@ -97,28 +104,29 @@ function json(obj, status = 200) {
   });
 }
 
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+  return bytes;
+}
+
 function landingPage(env) {
   return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Eclipse Discord Bot</title></head>
 <body style="font-family:system-ui;background:#1a1a1a;color:#e0e0e0;padding:2rem">
-<h1>🎵 Eclipse Discord Bot</h1>
+<h1>Eclipse Discord Bot</h1>
 <p>Routes Discord slash commands to your Eclipse music addon instances.</p>
 <table border="1" cellpadding="6" style="border-collapse:collapse">
 <tr><th>Addon</th><th>URL</th></tr>
 <tr><td>monochrome</td><td><a href="${env.MONOCHROME_URL}/manifest.json" style="color:#6cb6ff">${env.MONOCHROME_URL}</a></td></tr>
 <tr><td>qobuz-tidal</td><td><a href="${env.QOBUZ_TIDAL_URL}/manifest.json" style="color:#6cb6ff">${env.QOBUZ_TIDAL_URL}</a></td></tr>
 </table>
-<h3>Commands</h3>
-<ul>
-  <li><code>/play query: "song name"</code> — search both addons, return top track + stream URL</li>
-  <li><code>/search query: "artist"</code> — list up to 10 matching tracks</li>
-  <li><code>/stream id: "track_id" source: monochrome|qobuz-tidal</code> — resolve a direct stream URL</li>
-  <li><code>/health</code> — check which addon instances are online</li>
-</ul>
 <h3>Interactions Endpoint</h3>
-<p>Set this URL in the Discord Developer Portal → your app → Interactions Endpoint URL:</p>
-<code>https://<your-worker>.workers.dev/interactions</code>
+<p>Set this URL in Discord Developer Portal &rarr; Interactions Endpoint URL:</p>
+<code>https://discord-bot.cyrusna29.workers.dev/interactions</code>
 </body>
 </html>`;
 }
